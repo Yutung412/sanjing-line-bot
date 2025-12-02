@@ -90,17 +90,33 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 
-@app.route("/callback", methods=['POST'])
+from flask import Flask, request, abort
+
+# ...中間程式一樣，略...
+
+# 一個簡單首頁，方便 Render / 健康檢查使用
+@app.route("/", methods=["GET"])
+def index():
+    return "LINE bot is running on Render.", 200
+
+
+@app.route("/callback", methods=["GET", "POST"])
 def callback():
-    signature = request.headers.get('X-Line-Signature', '')
+    # LINE 在「檢查 webhook」時，有可能用 GET 先打一次
+    if request.method == "GET":
+        return "OK", 200
+
+    # 下面是原本處理 POST webhook 的邏輯
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        return abort(400)
+        return "Invalid signature", 400
 
-    return "OK"
+    return "OK", 200
+
 
 
 # ========= LINE 訊息處理 =========

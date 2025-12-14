@@ -20,7 +20,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # 設定 Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 # 使用最新的 Flash 模型，速度快且聰明
-gemini_model = genai.GenerativeModel("gemini-1.5-flash") # fix version
+gemini_model = genai.GenerativeModel("gemini-pro")
 
 # ========= 2. 讀取資料 =========
 print("正在讀取資料庫...")

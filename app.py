@@ -29,6 +29,10 @@ print("GEMINI_API_KEY 載入成功：", bool(GEMINI_API_KEY))
 # ========= 設定 Gemini =========
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+MODEL_NAME = "gemini-1.5-flash"
+print(">>> Using Gemini model:", MODEL_NAME)
+
+gemini_model = genai.GenerativeModel(MODEL_NAME)
 
 
 

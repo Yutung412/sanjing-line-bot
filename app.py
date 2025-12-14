@@ -28,7 +28,8 @@ print("GEMINI_API_KEY 載入成功：", bool(GEMINI_API_KEY))
 
 # ========= 設定 Gemini =========
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+
 
 
 # ========= 讀取 FAQ + 商品資料 =========

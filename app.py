@@ -151,9 +151,13 @@ def llm_pick_candidates(user_text: str, topk: int = 5):
                 out.append(x)
 
         return out[:topk], data.get("reason", "")
+    
     except Exception as e:
-        print("候選檢索失敗：", e)
-        return [], "檢索失敗"
+        print("候選檢索失敗：", repr(e))
+        # 讓你在 Render logs 看到更完整 stack trace
+        import traceback
+        traceback.print_exc()
+        return [], f"檢索失敗：{type(e).__name__}"
 
 DEMO_COLS = [
     "brand", "product_name", "model_code", "price",
@@ -200,27 +204,51 @@ def callback():
 
 
 # ========= LINE 訊息處理 =========
+def build_single_row_markdown(row):
+    if row is None:
+        return ""
+    df = pd.DataFrame([row])
+    cols = [c for c in DEMO_COLS if c in df.columns]
+    return df[cols].fillna("").astype(str).to_markdown(index=False)
+
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_text = event.message.text
+    user_text = event.message.text.strip()
 
-    # 先走 FAQ（保留原本）
+    # 0) 打招呼（無狀態版本）
+    greetings = ["哈囉", "你好", "嗨", "hi", "hello", "您好"]
+    if user_text.lower() in [g.lower() for g in greetings]:
+        welcome = (
+            "您好，歡迎來到三井3C～\n"
+            "想找哪一類商品呢？（例如：筆電/平板/顯卡/螢幕）\n"
+            "也可以直接告訴我：預算、用途、尺寸、品牌偏好，我可以幫您推薦。"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=welcome))
+        return
+
+    # 1) FAQ（保留原本）
     faq_q, faq_a, faq_score = search_faq(user_text)
     faq_part = ""
     if faq_q:
         faq_part = f"相關 FAQ：{faq_q}\n回答：{faq_a}\n（相似度 {faq_score:.2f}）"
 
-    # ✅ 第一階段：用 PRODUCT_INDEX 找候選型號
+    # 2) 第一階段：LLM 從 PRODUCT_INDEX 挑候選型號
     candidates, reason = llm_pick_candidates(user_text, topk=5)
-
-    # ✅ 第二階段：把候選型號對應的商品列出成 Markdown 表格
     cand_md = build_candidate_markdown(candidates)
 
-    # 若沒有 FAQ 且沒有候選商品：直接回澄清問題（不要讓模型亂推）
+    # 3) fallback：LLM 找不到 / 檢索失敗 -> 用 difflib 找一台頂著 demo
+    if not cand_md:
+        prod_row, prod_score = search_product(user_text)
+        if prod_row is not None and prod_score >= 0.35:
+            cand_md = build_single_row_markdown(prod_row)
+            reason = f"fallback: difflib score={prod_score:.2f}"
+
+    # 4) 若沒有 FAQ 且沒有候選商品：才回澄清（避免幻覺）
     if not faq_part and not cand_md:
         answer = (
-            "我目前在商品清單中找不到能直接對應的型號。\n"
-            "為了推薦更準，想先確認：\n"
+            "您好～我可以幫您推薦，但目前資訊還不夠精準。\n"
+            "想先確認：\n"
             "1) 預算範圍？\n"
             "2) 主要用途（文書/剪片/遊戲/攜帶）？\n"
             "3) 螢幕尺寸偏好？\n"
@@ -230,7 +258,7 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:1000]))
         return
 
-    # 有候選 or 有 FAQ：用「候選表」+「FAQ」讓模型回答（鎖死）
+    # 5) 第二階段：用候選表 + FAQ 產生最終回覆（鎖死資料來源）
     prompt = f"""
 你是三井3C客服，只能使用我提供的【FAQ】與【候選商品表】回覆。
 
@@ -247,7 +275,7 @@ def handle_message(event):
 - 嚴禁新增任何表格中不存在的商品、規格、價格、保固、活動、庫存
 - 若使用者問到表格沒有的資訊，回答：「資料未提供，建議以官網/門市為準」
 - 回覆格式：
-1) 1～3 行結論
+1) 先用 1～2 句打招呼 + 1～3 行結論
 2) 推薦 1～3 台（每台列：型號(model_code)、價格(price)、適合誰、連結(product_url)）
 """
 
@@ -262,7 +290,7 @@ def handle_message(event):
         )
         answer = response.choices[0].message.content
     except Exception as e:
-        print("Groq 發生錯誤：", e)
+        print("Groq 發生錯誤：", repr(e))
         answer = "目前系統較忙，請稍後再試，或洽詢門市人員。"
 
     line_bot_api.reply_message(

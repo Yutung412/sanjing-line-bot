@@ -166,13 +166,21 @@ DEMO_COLS = [
 ]
 
 def build_candidate_markdown(candidates):
-    """把候選型號對應的列，轉成 Markdown 表格給第二階段回覆用"""
     if not candidates:
         return ""
-    df = product_df[product_df[PRODUCT_MODEL_COL].astype(str).isin([str(x) for x in candidates])].copy()
-    if df.empty:
+
+    cand = [str(x).strip() for x in candidates if str(x).strip()]
+
+    tmp = product_df.copy()
+    tmp[PRODUCT_MODEL_COL] = tmp[PRODUCT_MODEL_COL].astype(str).str.strip()
+
+    hit = tmp[tmp[PRODUCT_MODEL_COL].isin(cand)].copy()
+    if hit.empty:
+        print("candidates exist but no rows matched. candidates=", cand)
         return ""
-    return df[DEMO_COLS].fillna("").astype(str).to_markdown(index=False)
+
+    return hit[DEMO_COLS].fillna("").astype(str).to_markdown(index=False)
+
 
 # ========= Flask + LINE 初始化 =========
 app = Flask(__name__)
@@ -236,13 +244,20 @@ def handle_message(event):
     # 2) 第一階段：LLM 從 PRODUCT_INDEX 挑候選型號
     candidates, reason = llm_pick_candidates(user_text, topk=5)
     cand_md = build_candidate_markdown(candidates)
+    print("user_text:", user_text)
+    print("candidates:", candidates)
+    print("reason:", reason)
+    print("cand_md length:", len(cand_md))
 
     # 3) fallback：LLM 找不到 / 檢索失敗 -> 用 difflib 找一台頂著 demo
+    prod_score = None 
+    
     if not cand_md:
         prod_row, prod_score = search_product(user_text)
-        if prod_row is not None and prod_score >= 0.35:
+        if prod_row is not None and prod_score >= 0.20:
             cand_md = build_single_row_markdown(prod_row)
             reason = f"fallback: difflib score={prod_score:.2f}"
+    print("fallback prod_score:", prod_score)
 
     # 4) 若沒有 FAQ 且沒有候選商品：才回澄清（避免幻覺）
     if not faq_part and not cand_md:

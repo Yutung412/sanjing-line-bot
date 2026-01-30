@@ -9,7 +9,6 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 from dotenv import load_dotenv
 from groq import Groq
-import json
 
 # ========= 讀取環境變數 =========
 load_dotenv()
@@ -31,20 +30,9 @@ print(">>> Using Groq model:", MODEL_NAME)
 
 # ========= 讀取 FAQ + 商品資料 =========
 faq_df = pd.read_excel("faq.xlsx")
-product_df = pd.read_csv("sanjing_notebook_page1_3.csv")
+product_df = pd.read_csv("sanjing_notebook_page1_3.csv", dtype=str, keep_default_na=False)
 
-# 讀 Markdown 檔（Colab 產生的）
-print("product_index.md exists:", os.path.exists("product_index.md"))
-print("product_table.md exists:", os.path.exists("product_table.md"))
 
-with open("product_index.md", encoding="utf-8") as f:
-    PRODUCT_INDEX = f.read()
-
-with open("product_table.md", encoding="utf-8") as f:
-    PRODUCT_TABLE_MD = f.read()
-
-print("PRODUCT_INDEX length:", len(PRODUCT_INDEX))
-print("PRODUCT_TABLE_MD length:", len(PRODUCT_TABLE_MD))
 
 FAQ_QUESTION_COL = "修正提問"
 FAQ_ANSWER_COL   = "修正後回答"
@@ -79,85 +67,40 @@ def search_faq(user_text):
         return None, None, 0
     return best_q, best_a, best_score
 
+# ========= 商品搜尋（TopK，demo 穩定版） =========
+def search_product_topk(user_text: str, topk: int = 5):
+    """
+    用 difflib 在本地做 TopK 檢索（不靠 LLM、不靠 markdown檔）
+    讓中文需求（剪片/遊戲/16GB/1TB）也比較容易比到
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return []
 
-# ========= 商品搜尋（模糊比對） =========
-def search_product(user_text):
-    best_row, best_score = None, 0
+    scored = []
     for _, row in product_df.iterrows():
         target = " ".join([
-            str(row[PRODUCT_BRAND_COL]),
-            str(row[PRODUCT_NAME_COL]),
-            str(row[PRODUCT_MODEL_COL])
+            str(row.get(PRODUCT_BRAND_COL, "")),
+            str(row.get(PRODUCT_NAME_COL, "")),
+            str(row.get(PRODUCT_MODEL_COL, "")),
+            str(row.get(PRODUCT_CPU_COL, "")),
+            str(row.get(PRODUCT_GPU_COL, "")),
+            str(row.get(PRODUCT_RAM_COL, "")),
+            str(row.get(PRODUCT_STORAGE_COL, "")),
+            str(row.get(PRODUCT_SIZE_COL, "")),
+            str(row.get(PRODUCT_OS_COL, "")),
+            str(row.get(PRODUCT_FEATURE_COL, "")),
         ])
-        score = difflib.SequenceMatcher(None, user_text, target).ratio()
-        if score > best_score:
-            best_score = score
-            best_row = row
-    if best_score < 0.3:
-        return None, 0
-    return best_row, best_score
 
-def safe_json_extract(text: str):
-    """從模型輸出中抽出第一段 JSON 並解析（容錯用）"""
-    try:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        return json.loads(text[start:end+1])
-    except Exception:
-        return None
+        score = difflib.SequenceMatcher(None, text, target).ratio()
+        scored.append((score, row))
 
-def llm_pick_candidates(user_text: str, topk: int = 5):
-    """
-    第一階段：用 PRODUCT_INDEX 讓模型挑出候選 model_code
-    注意：只做檢索，不要讓模型直接推薦
-    """
-    retrieval_prompt = f"""
-你是檢索器，不是客服。你的任務是：從【商品索引】挑出最符合使用者需求的候選商品型號。
+    scored.sort(key=lambda x: x[0], reverse=True)
 
-【使用者需求】
-{user_text}
+    # demo 先放寬門檻，避免「永遠找不到」
+    results = [(row, score) for score, row in scored[:topk] if score >= 0.12]
+    return results
 
-【商品索引】
-{PRODUCT_INDEX}
-
-規則：
-- 只能從索引中挑選，禁止臆測不存在的型號
-- 請只回傳 JSON（不要多任何字），格式固定：
-{{"candidates":["型號1","型號2"],"reason":"一句話理由"}}
-- candidates 最多 {topk} 個；找不到就回 []，reason 說明缺少哪些條件（例如預算/尺寸/用途/品牌）
-"""
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "你是嚴謹的資料檢索器，只輸出 JSON，不輸出多餘文字。"},
-                {"role": "user", "content": retrieval_prompt}
-            ],
-            temperature=0,
-        )
-        raw = resp.choices[0].message.content.strip()
-        data = safe_json_extract(raw) or {}
-        cands = data.get("candidates", [])
-
-        # 清理 candidates：只留字串、去空白、去重
-        cands = [str(x).strip() for x in cands if str(x).strip()]
-        seen = set()
-        out = []
-        for x in cands:
-            if x not in seen:
-                seen.add(x)
-                out.append(x)
-
-        return out[:topk], data.get("reason", "")
-    
-    except Exception as e:
-        print("候選檢索失敗：", repr(e))
-        # 讓你在 Render logs 看到更完整 stack trace
-        import traceback
-        traceback.print_exc()
-        return [], f"檢索失敗：{type(e).__name__}"
 
 DEMO_COLS = [
     "brand", "product_name", "model_code", "price",
@@ -165,22 +108,22 @@ DEMO_COLS = [
     "display_size", "weight", "os", "product_url"
 ]
 
-def build_candidate_markdown(candidates):
-    if not candidates:
+def build_topk_markdown(rows):
+    """
+    rows: [(row, score), ...]
+    轉成 markdown 表格給 LLM 產生回覆用
+    """
+    if not rows:
         return ""
 
-    cand = [str(x).strip() for x in candidates if str(x).strip()]
+    only_rows = [r for r, s in rows]
+    df = pd.DataFrame(only_rows)
 
-    tmp = product_df.copy()
-    tmp[PRODUCT_MODEL_COL] = tmp[PRODUCT_MODEL_COL].astype(str).str.strip()
-
-    hit = tmp[tmp[PRODUCT_MODEL_COL].isin(cand)].copy()
-    if hit.empty:
-        print("candidates exist but no rows matched. candidates=", cand)
+    cols = [c for c in DEMO_COLS if c in df.columns]
+    if not cols:
         return ""
 
-    return hit[DEMO_COLS].fillna("").astype(str).to_markdown(index=False)
-
+    return df[cols].fillna("").astype(str).to_markdown(index=False)
 
 # ========= Flask + LINE 初始化 =========
 app = Flask(__name__)
@@ -211,15 +154,6 @@ def callback():
     return "OK", 200
 
 
-# ========= LINE 訊息處理 =========
-def build_single_row_markdown(row):
-    if row is None:
-        return ""
-    df = pd.DataFrame([row])
-    cols = [c for c in DEMO_COLS if c in df.columns]
-    return df[cols].fillna("").astype(str).to_markdown(index=False)
-
-
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text.strip()
@@ -241,35 +175,26 @@ def handle_message(event):
     if faq_q:
         faq_part = f"相關 FAQ：{faq_q}\n回答：{faq_a}\n（相似度 {faq_score:.2f}）"
 
-    # 2) 第一階段：LLM 從 PRODUCT_INDEX 挑候選型號
-    candidates, reason = llm_pick_candidates(user_text, topk=5)
-    cand_md = build_candidate_markdown(candidates)
+    # 2) 商品 TopK 檢索（完全不靠 LLM、不靠 markdown 檔）
+    topk_rows = search_product_topk(user_text, topk=5)
+    cand_md = build_topk_markdown(topk_rows)
+
     print("user_text:", user_text)
-    print("candidates:", candidates)
-    print("reason:", reason)
+    print("topk_scores:", [round(s, 3) for _, s in topk_rows])
     print("cand_md length:", len(cand_md))
 
-    # 3) fallback：LLM 找不到 / 檢索失敗 -> 用 difflib 找一台頂著 demo
-    prod_score = None 
-    
-    if not cand_md:
-        prod_row, prod_score = search_product(user_text)
-        if prod_row is not None and prod_score >= 0.20:
-            cand_md = build_single_row_markdown(prod_row)
-            reason = f"fallback: difflib score={prod_score:.2f}"
-    print("fallback prod_score:", prod_score)
 
     # 4) 若沒有 FAQ 且沒有候選商品：才回澄清（避免幻覺）
     if not faq_part and not cand_md:
         answer = (
-            "您好～我可以幫您推薦，但目前資訊還不夠精準。\n"
-            "想先確認：\n"
-            "1) 預算範圍？\n"
-            "2) 主要用途（文書/剪片/遊戲/攜帶）？\n"
-            "3) 螢幕尺寸偏好？\n"
-            "4) RAM/儲存需求（例如 16GB / 1TB）？\n"
-            f"（檢索原因：{reason}）"
-        )
+        "您好～我可以幫您推薦，但目前資訊還不夠精準。\n"
+        "想先確認：\n"
+        "1) 預算範圍？\n"
+        "2) 主要用途（文書/剪片/遊戲/攜帶）？\n"
+        "3) 螢幕尺寸偏好？\n"
+        "4) RAM/儲存需求（例如 16GB / 1TB）？\n"
+    )
+        
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:1000]))
         return
 

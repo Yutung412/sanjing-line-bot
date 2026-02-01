@@ -34,6 +34,23 @@ product_df = pd.read_csv("sanjing_notebook_page1_3.csv", dtype=str, keep_default
 
 import re
 
+
+PRODUCT_BRAND_COL   = "brand"
+PRODUCT_NAME_COL    = "product_name"
+PRODUCT_MODEL_COL   = "model_code"
+PRODUCT_PRICE_COL   = "price"
+PRODUCT_CPU_COL     = "cpu"
+PRODUCT_GPU_COL     = "gpu"
+PRODUCT_RAM_COL     = "memory"
+PRODUCT_STORAGE_COL = "storage_detail"
+PRODUCT_SIZE_COL    = "display_size"
+PRODUCT_WEIGHT_COL  = "weight"
+PRODUCT_OS_COL      = "os"
+PRODUCT_WIFI_COL    = "wifi"
+PRODUCT_FEATURE_COL = "feature"
+PRODUCT_URL_COL     = "product_url"
+PRODUCT_WARRANTY_COL = "warranty"
+
 # ========= 資料正規化（商品） =========
 
 # 1) brand 統一：把「ASUS 華碩」這種轉成 ASUS、Lenovo 聯想 -> Lenovo ...
@@ -122,12 +139,45 @@ def parse_warranty_years(x: str):
 
     return None
 
-# 將正規化欄位加到 product_df
-product_df["brand_norm"] = product_df[PRODUCT_BRAND_COL].apply(normalize_brand)
-product_df["price_num"] = product_df[PRODUCT_PRICE_COL].apply(parse_price)
-product_df["display_inch"] = product_df[PRODUCT_SIZE_COL].apply(parse_display_inch)
-product_df["weight_kg"] = product_df[PRODUCT_WEIGHT_COL].apply(parse_weight_kg)
-product_df["warranty_years"] = product_df["warranty"].apply(parse_warranty_years) if "warranty" in product_df.columns else None
+# ========= warranty 正規化 =========
+if PRODUCT_WARRANTY_COL in product_df.columns:
+    product_df["warranty_years"] = product_df[PRODUCT_WARRANTY_COL].apply(parse_warranty_years)
+else:
+    product_df["warranty_years"] = None
+
+
+# ========= 將正規化欄位加到 product_df =========
+
+# brand_norm
+if PRODUCT_BRAND_COL in product_df.columns:
+    product_df["brand_norm"] = product_df[PRODUCT_BRAND_COL].apply(normalize_brand)
+else:
+    product_df["brand_norm"] = ""
+
+# price_num
+if PRODUCT_PRICE_COL in product_df.columns:
+    product_df["price_num"] = product_df[PRODUCT_PRICE_COL].apply(parse_price)
+else:
+    product_df["price_num"] = None
+
+# display_inch
+if PRODUCT_SIZE_COL in product_df.columns:
+    product_df["display_inch"] = product_df[PRODUCT_SIZE_COL].apply(parse_display_inch)
+else:
+    product_df["display_inch"] = None
+
+# weight_kg
+if PRODUCT_WEIGHT_COL in product_df.columns:
+    product_df["weight_kg"] = product_df[PRODUCT_WEIGHT_COL].apply(parse_weight_kg)
+else:
+    product_df["weight_kg"] = None
+
+# warranty_years（你已經寫好了，就留這段）
+if PRODUCT_WARRANTY_COL in product_df.columns:
+    product_df["warranty_years"] = product_df[PRODUCT_WARRANTY_COL].apply(parse_warranty_years)
+else:
+    product_df["warranty_years"] = None
+
 
 print("商品正規化完成：")
 print("- price_num 有值筆數：", product_df["price_num"].notna().sum())
@@ -138,20 +188,6 @@ print("- weight_kg 有值筆數：", product_df["weight_kg"].notna().sum())
 FAQ_QUESTION_COL = "修正提問"
 FAQ_ANSWER_COL   = "修正後回答"
 
-PRODUCT_BRAND_COL   = "brand"
-PRODUCT_NAME_COL    = "product_name"
-PRODUCT_MODEL_COL   = "model_code"
-PRODUCT_PRICE_COL   = "price"
-PRODUCT_CPU_COL     = "cpu"
-PRODUCT_GPU_COL     = "gpu"
-PRODUCT_RAM_COL     = "memory"
-PRODUCT_STORAGE_COL = "storage_detail"
-PRODUCT_SIZE_COL    = "display_size"
-PRODUCT_WEIGHT_COL  = "weight"
-PRODUCT_OS_COL      = "os"
-PRODUCT_WIFI_COL    = "wifi"
-PRODUCT_FEATURE_COL = "feature"
-PRODUCT_URL_COL     = "product_url"
 
 
 # ========= FAQ 搜尋（模糊比對） =========
@@ -374,16 +410,17 @@ def handle_message(event):
 
     # 4) 若沒有 FAQ 且沒有候選商品：才回澄清（避免幻覺）
     if not faq_part and not cand_md:
-    answer = (
-        "您好～我可以幫您推薦，但目前資訊還不夠精準。\n"
-        "想先確認：\n"
-        "1) 預算範圍？\n"
-        "2) 主要用途（文書/剪片/遊戲/攜帶）？\n"
-        "3) 螢幕尺寸偏好？\n"
-        "4) RAM/儲存需求（例如 16GB / 1TB）？\n"
-    )
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:1000]))
-    return
+        answer = (
+            "您好～我可以幫您推薦，但目前資訊還不夠精準。\n"
+            "想先確認：\n"
+            "1) 預算範圍？\n"
+            "2) 主要用途（文書/剪片/遊戲/攜帶）？\n"
+            "3) 螢幕尺寸偏好？\n"
+            "4) RAM/儲存需求（例如 16GB / 1TB）？\n"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:1000]))
+        return
+
 
 
     # 5) 第二階段：用候選表 + FAQ 產生最終回覆（鎖死資料來源）

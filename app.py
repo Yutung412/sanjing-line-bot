@@ -32,6 +32,107 @@ print(">>> Using Groq model:", MODEL_NAME)
 faq_df = pd.read_excel("faq.xlsx")
 product_df = pd.read_csv("sanjing_notebook_page1_3.csv", dtype=str, keep_default_na=False)
 
+import re
+
+# ========= 資料正規化（商品） =========
+
+# 1) brand 統一：把「ASUS 華碩」這種轉成 ASUS、Lenovo 聯想 -> Lenovo ...
+BRAND_KEYWORDS = [
+    ("Acer", ["acer", "宏碁"]),
+    ("ASUS", ["asus", "華碩"]),
+    ("GIGABYTE", ["gigabyte", "技嘉"]),
+    ("HP", ["hp", "惠普"]),
+    ("Lenovo", ["lenovo", "聯想"]),
+    ("LG", ["lg", "樂金"]),
+    ("MSI", ["msi", "微星"]),
+]
+
+def normalize_brand(x: str) -> str:
+    s = (x or "").strip().lower()
+    for canon, keys in BRAND_KEYWORDS:
+        if any(k in s for k in keys):
+            return canon
+    # 找不到就回原字串（保底）
+    return (x or "").strip()
+
+# 2) price 轉數字：你現在看起來是純數字，但這邊保險（避免未來有逗號/符號）
+def parse_price(x: str):
+    s = (x or "").strip()
+    # 只保留數字
+    digits = re.sub(r"[^\d]", "", s)
+    return int(digits) if digits else None
+
+# 3) display_size 抽尺寸（吋）： "14吋 FHD ..." -> 14
+def parse_display_inch(x: str):
+    s = (x or "").strip()
+    m = re.search(r"(\d+(?:\.\d+)?)\s*吋", s)
+    if m:
+        try:
+            return float(m.group(1))
+        except:
+            return None
+    # 有些資料可能是 14" 這種
+    m2 = re.search(r"(\d+(?:\.\d+)?)\s*\"", s)
+    if m2:
+        try:
+            return float(m2.group(1))
+        except:
+            return None
+    return None
+
+# 4) weight 統一成 kg 浮點數：支援 1.3kg / 1.3KG / "約1.3kg"
+def parse_weight_kg(x: str):
+    s = (x or "").strip().lower()
+    # 抓像 1.25kg / 1kg / 1.25 KG
+    m = re.search(r"(\d+(?:\.\d+)?)\s*kg", s, flags=re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except:
+            return None
+    # 若出現 g（少見，但保底）
+    m2 = re.search(r"(\d+(?:\.\d+)?)\s*g", s, flags=re.IGNORECASE)
+    if m2:
+        try:
+            return float(m2.group(1)) / 1000.0
+        except:
+            return None
+    return None
+
+# 5) warranty 抽保固年：支援 1年/一年/兩年/2年/含文字
+CH_NUM = {"一":1, "二":2, "兩":2, "三":3, "四":4, "五":5}
+
+def parse_warranty_years(x: str):
+    s = (x or "").strip()
+    if not s:
+        return None
+
+    # 先抓阿拉伯數字：2年、3 年
+    m = re.search(r"(\d+)\s*年", s)
+    if m:
+        try:
+            return int(m.group(1))
+        except:
+            pass
+
+    # 再抓中文數字：一年、兩年、三年...
+    m2 = re.search(r"([一二兩三四五])\s*年", s)
+    if m2:
+        return CH_NUM.get(m2.group(1))
+
+    return None
+
+# 將正規化欄位加到 product_df
+product_df["brand_norm"] = product_df[PRODUCT_BRAND_COL].apply(normalize_brand)
+product_df["price_num"] = product_df[PRODUCT_PRICE_COL].apply(parse_price)
+product_df["display_inch"] = product_df[PRODUCT_SIZE_COL].apply(parse_display_inch)
+product_df["weight_kg"] = product_df[PRODUCT_WEIGHT_COL].apply(parse_weight_kg)
+product_df["warranty_years"] = product_df["warranty"].apply(parse_warranty_years) if "warranty" in product_df.columns else None
+
+print("商品正規化完成：")
+print("- price_num 有值筆數：", product_df["price_num"].notna().sum())
+print("- display_inch 有值筆數：", product_df["display_inch"].notna().sum())
+print("- weight_kg 有值筆數：", product_df["weight_kg"].notna().sum())
 
 
 FAQ_QUESTION_COL = "修正提問"
@@ -67,38 +168,125 @@ def search_faq(user_text):
         return None, None, 0
     return best_q, best_a, best_score
 
-# ========= 商品搜尋（TopK，demo 穩定版） =========
+# ========= 從使用者文字抽需求（預算/品牌/尺寸/保固/重量） =========
+def extract_user_constraints(user_text: str):
+    import re
+    t = (user_text or "").strip().lower()
+
+    # 品牌：看使用者有沒有提到
+    brand = None
+    for canon, keys in BRAND_KEYWORDS:
+        if any(k in t for k in keys):
+            brand = canon
+            break
+
+    # 尺寸：14吋 / 14 吋 / 14"
+    inch = None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*吋", t)
+    if m:
+        inch = float(m.group(1))
+    else:
+        m2 = re.search(r"(\d+(?:\.\d+)?)\s*\"", t)
+        if m2:
+            inch = float(m2.group(1))
+
+    # 預算：3萬內 / 30000以下 / 3 萬 以內 / 30k內
+    budget_max = None
+    # 例如 "3萬內"
+    m = re.search(r"(\d+)\s*萬\s*(?:內|以下|以內|不超過)", t)
+    if m:
+        budget_max = int(m.group(1)) * 10000
+    # 例如 "30000以下"
+    m2 = re.search(r"(\d{4,6})\s*(?:元|塊)?\s*(?:內|以下|以內|不超過)", t)
+    if m2:
+        budget_max = int(m2.group(1))
+
+    # 保固：2年 / 兩年
+    warranty_years = None
+    m = re.search(r"(\d+)\s*年", t)
+    if m:
+        warranty_years = int(m.group(1))
+    else:
+        m2 = re.search(r"(一|二|兩|三|四|五)\s*年", t)
+        if m2:
+            warranty_years = CH_NUM.get(m2.group(1))
+
+    # 重量：1.5kg內 / 1.2kg以下
+    weight_max = None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*kg\s*(?:內|以下|以內|不超過)", t)
+    if m:
+        weight_max = float(m.group(1))
+
+    return {
+        "brand": brand,
+        "inch": inch,
+        "budget_max": budget_max,
+        "warranty_years": warranty_years,
+        "weight_max": weight_max,
+    }
+
+
+# ========= 商品搜尋（TopK，條件過濾 + 打分） =========
 def search_product_topk(user_text: str, topk: int = 5):
     """
-    用 difflib 在本地做 TopK 檢索（不靠 LLM、不靠 markdown檔）
-    讓中文需求（剪片/遊戲/16GB/1TB）也比較容易比到
+    先用條件（品牌/價格/尺寸/保固/重量）過濾，再用 difflib 做 TopK 排序
+    demo 成功率會比純字串比對高很多
     """
     text = (user_text or "").strip()
     if not text:
         return []
 
-    scored = []
-    for _, row in product_df.iterrows():
-        target = " ".join([
-            str(row.get(PRODUCT_BRAND_COL, "")),
-            str(row.get(PRODUCT_NAME_COL, "")),
-            str(row.get(PRODUCT_MODEL_COL, "")),
-            str(row.get(PRODUCT_CPU_COL, "")),
-            str(row.get(PRODUCT_GPU_COL, "")),
-            str(row.get(PRODUCT_RAM_COL, "")),
-            str(row.get(PRODUCT_STORAGE_COL, "")),
-            str(row.get(PRODUCT_SIZE_COL, "")),
-            str(row.get(PRODUCT_OS_COL, "")),
-            str(row.get(PRODUCT_FEATURE_COL, "")),
-        ])
+    c = extract_user_constraints(text)
 
+    df = product_df.copy()
+
+    # (1) 品牌過濾
+    if c["brand"]:
+        df = df[df["brand_norm"] == c["brand"]]
+
+    # (2) 價格上限
+    if c["budget_max"] is not None:
+        df = df[df["price_num"].notna() & (df["price_num"] <= c["budget_max"])]
+
+    # (3) 尺寸：允許 ±0.2 吋容差（避免 14 / 14.0 / 14.1）
+    if c["inch"] is not None:
+        df = df[df["display_inch"].notna() & (df["display_inch"].between(c["inch"] - 0.2, c["inch"] + 0.2))]
+
+    # (4) 保固：有寫才比（有些商品可能沒資料）
+    if c["warranty_years"] is not None and "warranty_years" in df.columns:
+        df = df[df["warranty_years"].notna() & (df["warranty_years"] >= c["warranty_years"])]
+
+    # (5) 重量：可選
+    if c["weight_max"] is not None:
+        df = df[df["weight_kg"].notna() & (df["weight_kg"] <= c["weight_max"])]
+
+    # 如果條件過濾後完全沒東西：放寬（避免 demo 一直空）
+    if df.empty:
+        df = product_df.copy()
+
+    scored = []
+    for _, row in df.iterrows():
+        # 用更多欄位組成 target（提高比對命中）
+        target = " ".join([
+            row.get(PRODUCT_BRAND_COL, ""),
+            row.get("brand_norm", ""),
+            row.get(PRODUCT_NAME_COL, ""),
+            row.get(PRODUCT_MODEL_COL, ""),
+            row.get(PRODUCT_CPU_COL, ""),
+            row.get(PRODUCT_GPU_COL, ""),
+            row.get(PRODUCT_RAM_COL, ""),
+            row.get(PRODUCT_STORAGE_COL, ""),
+            row.get(PRODUCT_SIZE_COL, ""),
+            row.get(PRODUCT_OS_COL, ""),
+            row.get(PRODUCT_FEATURE_COL, ""),
+        ])
         score = difflib.SequenceMatcher(None, text, target).ratio()
         scored.append((score, row))
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # demo 先放寬門檻，避免「永遠找不到」
-    results = [(row, score) for score, row in scored[:topk] if score >= 0.12]
+    # 門檻放寬一點（demo 友善）
+    results = [(row, score) for score, row in scored[:topk] if score >= 0.10]
     return results
 
 
@@ -186,7 +374,7 @@ def handle_message(event):
 
     # 4) 若沒有 FAQ 且沒有候選商品：才回澄清（避免幻覺）
     if not faq_part and not cand_md:
-        answer = (
+    answer = (
         "您好～我可以幫您推薦，但目前資訊還不夠精準。\n"
         "想先確認：\n"
         "1) 預算範圍？\n"
@@ -194,9 +382,9 @@ def handle_message(event):
         "3) 螢幕尺寸偏好？\n"
         "4) RAM/儲存需求（例如 16GB / 1TB）？\n"
     )
-        
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:1000]))
-        return
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=answer[:1000]))
+    return
+
 
     # 5) 第二階段：用候選表 + FAQ 產生最終回覆（鎖死資料來源）
     prompt = f"""

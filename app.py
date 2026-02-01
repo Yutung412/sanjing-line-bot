@@ -172,17 +172,11 @@ if PRODUCT_WEIGHT_COL in product_df.columns:
 else:
     product_df["weight_kg"] = None
 
-# warranty_years（你已經寫好了，就留這段）
-if PRODUCT_WARRANTY_COL in product_df.columns:
-    product_df["warranty_years"] = product_df[PRODUCT_WARRANTY_COL].apply(parse_warranty_years)
-else:
-    product_df["warranty_years"] = None
-
-
 print("商品正規化完成：")
 print("- price_num 有值筆數：", product_df["price_num"].notna().sum())
 print("- display_inch 有值筆數：", product_df["display_inch"].notna().sum())
 print("- weight_kg 有值筆數：", product_df["weight_kg"].notna().sum())
+print("- warranty_years 有值筆數：", product_df["warranty_years"].notna().sum())
 
 
 FAQ_QUESTION_COL = "修正提問"
@@ -296,9 +290,15 @@ def search_product_topk(user_text: str, topk: int = 5):
     if c["weight_max"] is not None:
         df = df[df["weight_kg"].notna() & (df["weight_kg"] <= c["weight_max"])]
 
+    # 先印：條件抽取結果 + 過濾後剩幾筆
+    print("constraints:", c, "filtered_rows_before_fallback:", len(df))
+
     # 如果條件過濾後完全沒東西：放寬（避免 demo 一直空）
     if df.empty:
         df = product_df.copy()
+        print("fallback_to_all_products. rows:", len(df))
+
+
 
     scored = []
     for _, row in df.iterrows():
@@ -321,9 +321,11 @@ def search_product_topk(user_text: str, topk: int = 5):
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # 門檻放寬一點（demo 友善）
-    results = [(row, score) for score, row in scored[:topk] if score >= 0.10]
+    # demo：永遠回傳 TopK（不要再用門檻把結果濾光）
+    top = scored[:topk]
+    results = [(row, score) for score, row in top]
     return results
+
 
 
 DEMO_COLS = [

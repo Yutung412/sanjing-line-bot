@@ -1,6 +1,7 @@
 import os
 import difflib
 import pandas as pd
+import json
 
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -349,7 +350,7 @@ def build_topk_markdown(rows):
     if not cols:
         return ""
 
-    return df[cols].fillna("").astype(str).to_markdown(index=False)
+    return json.dumps(df[cols].fillna("").to_dict(orient="records"), ensure_ascii=False)
 
 # ========= Flask + LINE 初始化 =========
 app = Flask(__name__)
@@ -427,7 +428,7 @@ def handle_message(event):
 
     # 5) 第二階段：用候選表 + FAQ 產生最終回覆（鎖死資料來源）
     prompt = f"""
-你是三井3C客服，只能使用我提供的【FAQ】與【候選商品表】回覆。
+你是三井3C客服，只能使用我提供的【FAQ】與【候選商品JSON】回覆。
 
 【使用者問題】
 {user_text}
@@ -435,12 +436,12 @@ def handle_message(event):
 【FAQ】
 {faq_part or "（無）"}
 
-【候選商品表（你只能引用表內欄位）】
+【候選商品JSON（你只能引用 JSON 內欄位）】
 {cand_md or "（無）"}
 
 規則（非常重要）：
-- 嚴禁新增任何表格中不存在的商品、規格、價格、保固、活動、庫存
-- 若使用者問到表格沒有的資訊，回答：「資料未提供，建議以官網/門市為準」
+- 嚴禁新增任何 JSON 中不存在的商品、規格、價格、保固、活動、庫存
+- 若使用者問到 JSON 沒有的資訊，回答：「資料未提供，建議以官網/門市為準」
 - 回覆格式：
 1) 先用 1～2 句打招呼 + 1～3 行結論
 2) 推薦 1～3 台（每台列：型號(model_code)、價格(price)、適合誰、連結(product_url)）
